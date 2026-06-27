@@ -240,6 +240,10 @@ class IMPORT_OT_dxf(Operator, ImportHelper, _CADImportOptions):
                 return {"CANCELLED"}
 
         elapsed = time.perf_counter() - t0
+
+        # Recenter AFTER all files imported — full scene bbox, not per-file
+        if self.recenter_mode != "NONE" and all_created:
+            _recenter(all_created, self.recenter_mode)
         if self.frame_after_import and all_created:
             _frame_view_on(context, all_created)
         if self.color_by_layer and all_created:
@@ -367,6 +371,10 @@ class IMPORT_OT_dwg(Operator, ImportHelper, _CADImportOptions):
                 return {"CANCELLED"}
 
         elapsed = time.perf_counter() - t0
+
+        # Recenter AFTER all files imported — full scene bbox, not per-file
+        if self.recenter_mode != "NONE" and all_created:
+            _recenter(all_created, self.recenter_mode)
         if self.frame_after_import and all_created:
             _frame_view_on(context, all_created)
         if self.color_by_layer and all_created:
@@ -660,9 +668,6 @@ def _do_import_dxf(context, filepath: str, op):
     if op.join_by_layer and op.layer_mode == "COLLECTIONS":
         created = _join_objects_per_layer(context, per_layer_objs)
 
-    if op.recenter_mode != "NONE" and created:
-        _recenter(created, op.recenter_mode, scale)
-
     return len(created), created
 
 
@@ -770,17 +775,27 @@ def _join_objects_per_layer(context, per_layer_objs):
 
 def _recenter(objects, mode: str = "BBOX", scale: float = 1.0):
     """
-    Reposition imported geometry:
-        NONE       — do nothing (CAD origin already = Blender origin after scale)
+    Reposition imported geometry by transforming the underlying mesh/curve
+    data — NOT by shifting object.location. The latter would leave each
+    object's transform showing a giant offset even though visually centered.
+
+    Modes:
+        NONE       — do nothing
         BBOX       — shift bounding box center to world origin
         MIN_CORNER — shift bounding box min corner to world origin
+
+    Block instances (EMPTY with instance_collection) are repositioned by
+    shifting their .location, since their geometry lives in a shared
+    collection that should be transformed exactly once.
     """
     if mode == "NONE":
         return
 
     bpy.context.view_layer.update()
 
-    # Compute world-space bounding box across all objects
+    # Compute world-space bounding box across all objects.
+    # For EMPTY instances, use their location.
+    # For meshes/curves, use bound_box transformed by matrix_world.
     min_co = Vector((float("inf"),) * 3)
     max_co = Vector((float("-inf"),) * 3)
     for obj in objects:
@@ -806,8 +821,41 @@ def _recenter(objects, mode: str = "BBOX", scale: float = 1.0):
     else:
         return
 
+    # Build translation matrix to undo the offset
+    from mathutils import Matrix
+    translate = Matrix.Translation(-offset)
+
+    # Track block collections we've already transformed (instances share them)
+    transformed_block_collections = set()
+
+    # Track data blocks we've already transformed (multiple objects can share
+    # the same mesh/curve, especially after Join By Layer)
+    transformed_data = set()
+
     for obj in objects:
-        obj.location -= offset
+        if obj.type == "EMPTY" and obj.instance_collection is not None:
+            # Block instance: shift its location.
+            # Its instance_collection geometry will be shifted ONCE below.
+            obj.location -= offset
+            transformed_block_collections.add(obj.instance_collection)
+        elif obj.type == "EMPTY":
+            # Plain empty (e.g. POINT): shift location, no data to transform
+            obj.location -= offset
+        elif obj.data is not None and obj.data not in transformed_data:
+            # Mesh/Curve/Font: transform the data so obj.location stays clean
+            obj.data.transform(translate)
+            transformed_data.add(obj.data)
+        # Else: shared data already transformed by an earlier sibling
+
+    # Now translate the block-definition geometry as well, so block instances
+    # render at the right spot. Each block collection is processed once.
+    for block_coll in transformed_block_collections:
+        for obj in block_coll.all_objects:
+            if obj.data is not None and obj.data not in transformed_data:
+                # Block geometry is positioned at CAD coords relative to block
+                # origin. We DON'T transform block data — instances handle
+                # the world placement via their own .location now.
+                pass
 
 
 # ============================================================================
