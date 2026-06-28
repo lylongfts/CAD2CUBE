@@ -27,6 +27,7 @@ crashes on modern files, and has no DWG, no layer mapping, and no unit detection
 | Layer → Collection | ✅ | ❌ | ❌ |
 | Layer → Material (ACI colors) | ✅ | ❌ | ❌ |
 | Memory-efficient block instances | ✅ | ❌ | ❌ |
+| Hatch import (Solid & Patterns) | ✅ | ❌ | ❌ |
 | Auto unit detection (`$INSUNITS`) | ✅ | ❌ | ❌ |
 | Auto-recenter geographic coords | ✅ | ❌ | ❌ |
 | Recovers from corrupt files | ✅ | ❌ crash | ❌ |
@@ -43,6 +44,7 @@ crashes on modern files, and has no DWG, no layer mapping, and no unit detection
 - **Three recenter modes** — keep CAD coords, center bounding box, or snap min-corner to origin
 - **Auto-recenter & auto-frame** — CAD files with geographic coordinates just work
 - **Layer filtering** — `WALL, DOOR, !DIM_*` include/exclude syntax
+- **Hatch import** — convert solid fills and hatch patterns into Blender meshes or curve boundaries
 - **Curves stay curves** — splines, arcs, ellipses remain editable, not pre-meshed
 - **Tolerant reader** — opens corrupt/non-conforming DXFs that crash other importers
 
@@ -75,9 +77,9 @@ Recommended settings for architectural drawings:
 ## Supported entities
 
 LINE, LWPOLYLINE, POLYLINE (2D/3D), CIRCLE, ARC, ELLIPSE, SPLINE, POINT,
-3DFACE, SOLID, TEXT, MTEXT, INSERT (blocks), HATCH (solid + force-all modes).
+3DFACE, SOLID, TEXT, MTEXT, INSERT (blocks), HATCH (solid & patterns).
 
-Planned: pattern hatches, DIMENSION, LEADER, 3DSOLID, nested blocks.
+Planned: DIMENSION, LEADER, 3DSOLID, nested blocks.
 
 ## Tutorials
 
