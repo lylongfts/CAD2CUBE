@@ -534,18 +534,25 @@ def _frame_view_on(context, objects):
     min_co = Vector((float("inf"),) * 3)
     max_co = Vector((float("-inf"),) * 3)
     for obj in objects:
-        # Empties (block instances) have no bound_box geometry; use location
+        # Exclude block-instance empties from framing: mirrored/anomalous
+        # inserts can sit far from the drawing and would zoom the view out
+        # to include them. Frame on real geometry instead.
         if obj.type == "EMPTY":
-            loc = obj.matrix_world.translation
-            for i in range(3):
-                min_co[i] = min(min_co[i], loc[i])
-                max_co[i] = max(max_co[i], loc[i])
             continue
         for v in obj.bound_box:
             wv = obj.matrix_world @ Vector(v)
             for i in range(3):
                 min_co[i] = min(min_co[i], wv[i])
                 max_co[i] = max(max_co[i], wv[i])
+
+    # Fallback to empties only if there's no real geometry at all
+    if min_co.x == float("inf"):
+        for obj in objects:
+            if obj.type == "EMPTY":
+                loc = obj.matrix_world.translation
+                for i in range(3):
+                    min_co[i] = min(min_co[i], loc[i])
+                    max_co[i] = max(max_co[i], loc[i])
 
     if min_co.x == float("inf"):
         return
@@ -566,7 +573,11 @@ def _frame_view_on(context, objects):
         if space.clip_start > 0.1:
             space.clip_start = 0.1
 
-    # Select imported objects and frame them
+    # Select imported objects and frame them — but skip block-instance empties.
+    # Blender's view_selected() expands collection instances, pulling the
+    # viewport to include hidden block geometry that may sit at coordinates
+    # far from the main drawing (e.g. furniture blocks defined at their CAD
+    # base point hundreds of units away).
     try:
         bpy.ops.object.select_all(action="DESELECT")
     except RuntimeError:
@@ -574,6 +585,9 @@ def _frame_view_on(context, objects):
     active_set = False
     for obj in objects:
         try:
+            if obj.type == "EMPTY" and obj.instance_collection is not None:
+                obj.select_set(False)
+                continue
             obj.select_set(True)
             if not active_set:
                 context.view_layer.objects.active = obj
@@ -631,10 +645,29 @@ def _do_import_dxf(context, filepath: str, op):
         blocks_root.hide_viewport = True
         blocks_root.hide_render = True
 
+        # Pass 1: build every block's own geometry (no nested inserts yet).
         for block_def in doc.iter_block_definitions():
             block_coll = _build_block_collection(block_def, blocks_root, scale, op)
             if block_coll:
                 block_collections[block_def.name] = block_coll
+
+        # Pass 2: wire up nested INSERTs as collection instances (cheap —
+        # geometry is shared, not copied). This avoids the exponential blowup
+        # that baking caused with deeply nested dynamic blocks.
+        for block_def in doc.iter_block_definitions():
+            parent_coll = block_collections.get(block_def.name)
+            if parent_coll is None:
+                continue
+            for entity in block_def:
+                if entity.dxftype() != "INSERT":
+                    continue
+                nested_coll = block_collections.get(entity.dxf.name)
+                if nested_coll is None:
+                    continue
+                inst = converters.make_block_instance(
+                    entity, nested_coll, scale, op.flatten_z
+                )
+                parent_coll.objects.link(inst)
 
     created = []
     per_layer_objs = {}
@@ -694,11 +727,11 @@ def _build_block_collection(block_def, parent_collection, scale, op):
     parent_collection.children.link(coll)
 
     count = 0
+    has_nested = False
     for entity in block_def:
         if entity.dxftype() == "INSERT":
-            # Nested block: bake its geometry into this collection, transformed
-            # to the nested insert's position. Common in dynamic blocks.
-            count += _bake_nested_insert(entity, block_def, coll, scale, op, _doc=block_def.doc)
+            # Nested blocks are wired up as instances in pass 2, not baked here.
+            has_nested = True
             continue
         obj = converters.convert_entity(
             entity, scale,
@@ -724,77 +757,12 @@ def _build_block_collection(block_def, parent_collection, scale, op):
                 pass
         count += 1
 
-    if count == 0:
+    # Keep the collection if it has direct geometry OR will receive nested
+    # instances in pass 2 (otherwise an all-nested block would be discarded).
+    if count == 0 and not has_nested:
         bpy.data.collections.remove(coll)
         return None
     return coll
-
-
-def _bake_nested_insert(insert_entity, parent_block, target_coll, scale, op, _doc, _depth=0):
-    """
-    Bake a nested INSERT's geometry directly into target_coll, transformed
-    to the nested insert's local position/rotation/scale. Recurses up to a
-    safe depth to handle blocks nested inside blocks (dynamic blocks do this).
-    Returns the number of objects added.
-    """
-    import math
-    from mathutils import Matrix, Vector as V
-
-    if _depth > 5:  # guard against pathological/circular nesting
-        return 0
-
-    nested_name = insert_entity.dxf.name
-    try:
-        nested_block = _doc.blocks.get(nested_name)
-    except Exception:
-        return 0
-    if nested_block is None:
-        return 0
-
-    # Build the nested insert's transform (in block-local space, no scaling of
-    # coordinates here — convert_entity already applies `scale` to points)
-    ins = insert_entity.dxf.insert
-    loc = V((ins[0] * scale, ins[1] * scale,
-             (0.0 if op.flatten_z else (ins[2] * scale if len(ins) > 2 else 0.0))))
-    rot_z = math.radians(getattr(insert_entity.dxf, "rotation", 0.0))
-    sx = getattr(insert_entity.dxf, "xscale", 1.0) or 1.0
-    sy = getattr(insert_entity.dxf, "yscale", 1.0) or 1.0
-    sz = getattr(insert_entity.dxf, "zscale", 1.0) or 1.0
-    xform = (Matrix.Translation(loc)
-             @ Matrix.Rotation(rot_z, 4, "Z")
-             @ Matrix.Diagonal((sx, sy, sz, 1.0)))
-
-    added = 0
-    for entity in nested_block:
-        if entity.dxftype() == "INSERT":
-            added += _bake_nested_insert(entity, nested_block, target_coll,
-                                         scale, op, _doc, _depth + 1)
-            continue
-        obj = converters.convert_entity(
-            entity, scale,
-            curve_resolution=op.curve_resolution,
-            import_text=op.import_text,
-            flatten_z=op.flatten_z,
-            hatch_mode=op.hatch_mode,
-        )
-        if obj is None:
-            continue
-        # Apply the nested transform to the object's geometry
-        obj.matrix_world = xform @ obj.matrix_world
-        target_coll.objects.link(obj)
-        if op.color_by_layer:
-            try:
-                aci = getattr(entity.dxf, "color", 256)
-                if aci in (0, 256, None):
-                    obj.color = (0.8, 0.8, 0.8, 1.0)
-                else:
-                    r, g, b = _aci_to_rgb(aci)
-                    obj.color = (r, g, b, 1.0)
-            except (AttributeError, TypeError, ValueError):
-                pass
-        added += 1
-
-    return added
 
 
 def _expand_block_in_place(block_def, insert_entity, scale, op, layer_mgr, dxf_layers, created):
@@ -881,13 +849,18 @@ def _recenter(objects, mode: str = "BBOX", scale: float = 1.0):
 
     bpy.context.view_layer.update()
 
-    # Compute world-space bounding box across all objects.
-    # For EMPTY instances, use their location.
-    # For meshes/curves, use bound_box transformed by matrix_world.
+    # Compute world-space bounding box for the OFFSET from real geometry only
+    # (meshes/curves/text). Block-instance empties are excluded from this
+    # calculation because mirrored or anomalous inserts can sit at coordinates
+    # like -18000 while the drawing is at +18000, which would pull the computed
+    # center to a wrong (often near-zero) offset and defeat recentering.
+    # The empties are still MOVED by the same offset below.
     min_co = Vector((float("inf"),) * 3)
     max_co = Vector((float("-inf"),) * 3)
     for obj in objects:
         if obj.type == "EMPTY":
+            continue  # excluded from offset calc, moved later
+        if obj.type == "FONT":
             loc = obj.matrix_world.translation
             for i in range(3):
                 min_co[i] = min(min_co[i], loc[i])
@@ -898,6 +871,15 @@ def _recenter(objects, mode: str = "BBOX", scale: float = 1.0):
             for i in range(3):
                 min_co[i] = min(min_co[i], wv[i])
                 max_co[i] = max(max_co[i], wv[i])
+
+    # Fallback: if there was no real geometry, use empties so we still center
+    if min_co.x == float("inf"):
+        for obj in objects:
+            if obj.type == "EMPTY":
+                loc = obj.matrix_world.translation
+                for i in range(3):
+                    min_co[i] = min(min_co[i], loc[i])
+                    max_co[i] = max(max_co[i], loc[i])
 
     if min_co.x == float("inf"):
         return

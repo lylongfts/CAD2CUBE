@@ -135,12 +135,23 @@ class DXFDocument:
 # --- Block name helpers -----------------------------------------------------
 def _is_layout_block(name: str) -> bool:
     """
-    True for the model/paper space layout blocks that must never be imported
-    as geometry. Everything else — including anonymous dynamic-block defs
-    like *U10, *D24, *E5 — is real geometry we want.
+    True for blocks that must never be imported as geometry:
+      - *MODEL_SPACE / *PAPER_SPACE  (layout blocks)
+      - *D<digits>  (anonymous dimension blocks — contain scattered dimension
+        geometry such as extension lines, arrowheads, and POINT entities that
+        are not useful as standalone objects and pull the viewport bounding box
+        to incorrect coordinates)
+
+    Anonymous dynamic-block defs like *U10, *E5 are KEPT because INSERT
+    entities reference them directly as real geometry.
     """
     upper = name.upper()
-    return upper.startswith("*MODEL_SPACE") or upper.startswith("*PAPER_SPACE")
+    if upper.startswith("*MODEL_SPACE") or upper.startswith("*PAPER_SPACE"):
+        return True
+    # Anonymous dimension blocks: *D followed by one or more digits
+    if len(upper) > 2 and upper[0] == "*" and upper[1] == "D" and upper[2:].isdigit():
+        return True
+    return False
 
 
 # --- ACI color palette ------------------------------------------------------
