@@ -1,15 +1,15 @@
 schema_version = "1.0.0"
 
 id = "cad2cube"
-version = "1.4.5"
-name = "CAD2Cube — DXF / DWG Importer"
-tagline = "Free DXF and DWG importer with layers, units and block instances"
+version = "1.5.0"
+name = "CAD2Cube — DXF Importer"
+tagline = "Free DXF importer with layers, units and block instances"
 maintainer = "Long Live The Cube <https://www.youtube.com/@longlivethecube>"
 type = "add-on"
 
 website = "https://github.com/lylongfts/CAD2CUBE"
 
-tags = ["Import-Export", "Scene"]
+tags = ["Import-Export"]
 
 blender_version_min = "4.2.0"
 
@@ -20,13 +20,11 @@ license = [
 wheels = [
   "./wheels/ezdxf-1.4.4-py3-none-any.whl",
   "./wheels/pyparsing-3.3.2-py3-none-any.whl",
-  "./wheels/typing_extensions-4.15.0-py3-none-any.whl",
   "./wheels/fonttools-4.63.0-py3-none-any.whl",
 ]
 
 [permissions]
-files = "Import DXF/DWG CAD files from disk"
-network = "Open YouTube, Ko-fi, and GitHub links in browser"
+files = "Import DXF files from disk"
 
 [build]
 paths_exclude_pattern = [

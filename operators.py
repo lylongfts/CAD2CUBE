@@ -1,18 +1,13 @@
 """
 Import operators for CAD2Cube.
 
-    CAD2CUBE_OT_open_url  - opens a URL (YouTube / Coffee / GitHub / ODA)
-    IMPORT_OT_dxf         - direct DXF import
-    IMPORT_OT_dwg         - DWG import via ODA File Converter -> temp DXF
+    IMPORT_OT_dxf - direct DXF import
 """
 
 from __future__ import annotations
 
 import os
-import subprocess
-import tempfile
 import time
-import webbrowser
 from pathlib import Path
 
 import bpy
@@ -29,32 +24,14 @@ from bpy_extras.io_utils import ImportHelper
 from mathutils import Vector
 
 from .core import reader, converters, layers
-from .preferences import get_prefs, URL_ODA_DOWNLOAD, URL_COFFEE, URL_YOUTUBE
+from .preferences import get_prefs
 
 
 # ============================================================================
-# Utility operator: open a URL in the default browser
-# ============================================================================
-class CAD2CUBE_OT_open_url(Operator):
-    """Open a link in your web browser"""
-
-    bl_idname = "cad2cube.open_url"
-    bl_label = "Open Link"
-    bl_options = {"INTERNAL"}
-
-    url: StringProperty(default="")
-
-    def execute(self, context):
-        if self.url:
-            webbrowser.open(self.url)
-        return {"FINISHED"}
-
-
-# ============================================================================
-# Shared import options (mixin for both DXF and DWG operators)
+# Shared import options
 # ============================================================================
 class _CADImportOptions:
-    """All the import option fields shared by DXF and DWG operators."""
+    """All the import option fields for the DXF importer."""
 
     # --- Scale & Units ------------------------------------------------------
     units_mode: EnumProperty(
@@ -137,12 +114,23 @@ class _CADImportOptions:
         items=[
             ("NONE", "None", "Skip all hatches"),
             ("SOLID", "Solid hatches only",
-             "Import only hatches that are already solid fills (recommended)"),
+             "Import only hatches that are already solid fills"),
             ("ALL_AS_SOLID", "All hatches as solid",
              "Import every hatch as a solid fill, including pattern hatches "
              "(pattern lines are dropped, only the filled boundary is kept)"),
         ],
-        default="SOLID",
+        default="ALL_AS_SOLID",
+    )
+
+    merge_3d_faces: BoolProperty(
+        name="Merge 3D Faces into Single Mesh",
+        description=(
+            "Combine all imported 3DFACE entities into one Blender mesh and "
+            "weld shared vertices. Useful for terrain meshes from Civil 3D or "
+            "any surface composed of many triangles. Off by default since most "
+            "architectural files don't need it"
+        ),
+        default=False,
     )
 
     color_by_layer: BoolProperty(
@@ -255,6 +243,11 @@ class IMPORT_OT_dxf(Operator, ImportHelper, _CADImportOptions):
 
         elapsed = time.perf_counter() - t0
 
+        # Merge 3D faces into a single welded mesh BEFORE recenter, so the
+        # merged mesh participates in the bounding-box calculation correctly.
+        if self.merge_3d_faces and all_created:
+            all_created = _merge_3d_face_objects(all_created)
+
         # Recenter AFTER all files imported — full scene bbox, not per-file
         if self.recenter_mode != "NONE" and all_created:
             _recenter(all_created, self.recenter_mode)
@@ -266,138 +259,7 @@ class IMPORT_OT_dxf(Operator, ImportHelper, _CADImportOptions):
         self.report(
             {"INFO"},
             f"CAD2Cube: imported {total_objects} objects from {len(paths)} file(s) "
-            f"in {elapsed:.1f}s  -  enjoying it? Support at ko-fi.com/longlivethecube",
-        )
-        return {"FINISHED"}
-
-
-# ============================================================================
-# DWG Import Operator
-# ============================================================================
-class IMPORT_OT_dwg(Operator, ImportHelper, _CADImportOptions):
-    """Import an AutoCAD DWG file with CAD2Cube (requires ODA File Converter)"""
-
-    bl_idname = "import_scene.cad2cube_dwg"
-    bl_label = "Import DWG (CAD2Cube)"
-    bl_options = {"REGISTER", "UNDO", "PRESET"}
-
-    filename_ext = ".dwg"
-    filter_glob: StringProperty(default="*.dwg", options={"HIDDEN"})
-
-    files: CollectionProperty(type=bpy.types.OperatorFileListElement)
-    directory: StringProperty(subtype="DIR_PATH")
-
-    dwg_output_version: EnumProperty(
-        name="Convert As",
-        description="Target DXF version for ODA conversion. Newer = more features preserved",
-        items=[
-            ("ACAD2018", "AutoCAD 2018", ""),
-            ("ACAD2013", "AutoCAD 2013", ""),
-            ("ACAD2010", "AutoCAD 2010", ""),
-            ("ACAD2007", "AutoCAD 2007", ""),
-            ("ACAD2004", "AutoCAD 2004", ""),
-            ("ACAD2000", "AutoCAD 2000", ""),
-        ],
-        default="ACAD2018",
-    )
-
-    def invoke(self, context, event):
-        prefs = get_prefs(context)
-        if not prefs.oda_converter_path or not os.path.isfile(prefs.oda_converter_path):
-            # Friendly dialog with a download button instead of a dead-end error
-            return context.window_manager.invoke_props_dialog(self, width=420)
-
-        if prefs.default_auto_units:
-            self.units_mode = "AUTO"
-        else:
-            self.units_mode = "MANUAL"
-            self.manual_scale = prefs.default_scale
-        self.recenter_mode = "BBOX" if prefs.default_recenter else "NONE"
-        return super().invoke(context, event)
-
-    def draw(self, context):
-        prefs = get_prefs(context)
-        oda_ok = bool(prefs.oda_converter_path) and os.path.isfile(prefs.oda_converter_path)
-
-        layout = self.layout
-        if not oda_ok:
-            # This branch shows in the invoke_props_dialog when ODA is missing
-            box = layout.box()
-            box.label(text="DWG import needs ODA File Converter", icon="ERROR")
-            col = box.column(align=True)
-            col.scale_y = 0.9
-            col.label(text="DWG is a closed Autodesk format. CAD2Cube uses the free")
-            col.label(text="ODA File Converter to turn it into DXF first.")
-            col.separator()
-            op = box.operator(
-                "cad2cube.open_url",
-                text="1. Download ODA File Converter (free)",
-                icon="IMPORT",
-            )
-            op.url = URL_ODA_DOWNLOAD
-            box.label(text="2. Install it, then set its path in:")
-            box.label(text="   Edit > Preferences > Add-ons > CAD2Cube")
-            box.label(text="3. Re-open this DWG. (Tip: restart Blender to auto-detect.)")
-            return
-
-        box = layout.box()
-        box.label(text="DWG Conversion", icon="FILE_REFRESH")
-        box.prop(self, "dwg_output_version")
-        _draw_import_panel(layout, self)
-
-    def execute(self, context):
-        prefs = get_prefs(context)
-        oda_ok = bool(prefs.oda_converter_path) and os.path.isfile(prefs.oda_converter_path)
-        if not oda_ok:
-            # User confirmed the info dialog; don't try to import.
-            self.report(
-                {"WARNING"},
-                "CAD2Cube: set the ODA File Converter path in Preferences, then retry.",
-            )
-            return {"CANCELLED"}
-
-        paths = _collect_paths(self)
-        if not paths:
-            self.report({"ERROR"}, "No file selected")
-            return {"CANCELLED"}
-
-        total_objects = 0
-        all_created = []
-        t0 = time.perf_counter()
-
-        for dwg_path in paths:
-            try:
-                dxf_path = _convert_dwg_to_dxf(
-                    dwg_path, prefs.oda_converter_path, self.dwg_output_version,
-                )
-                count, created = _do_import_dxf(context, dxf_path, self)
-                total_objects += count
-                all_created.extend(created)
-
-                if not prefs.keep_temp_dxf:
-                    try:
-                        os.remove(dxf_path)
-                        os.rmdir(os.path.dirname(dxf_path))
-                    except OSError:
-                        pass
-            except Exception as e:
-                self.report({"ERROR"}, f"{Path(dwg_path).name}: {e}")
-                return {"CANCELLED"}
-
-        elapsed = time.perf_counter() - t0
-
-        # Recenter AFTER all files imported — full scene bbox, not per-file
-        if self.recenter_mode != "NONE" and all_created:
-            _recenter(all_created, self.recenter_mode)
-        if self.frame_after_import and all_created:
-            _frame_view_on(context, all_created)
-        if self.color_by_layer and all_created:
-            _enable_object_color_shading(context)
-
-        self.report(
-            {"INFO"},
-            f"CAD2Cube: imported {total_objects} objects from {len(paths)} DWG file(s) "
-            f"in {elapsed:.1f}s  -  support at ko-fi.com/longlivethecube",
+            f"in {elapsed:.1f}s",
         )
         return {"FINISHED"}
 
@@ -430,6 +292,7 @@ def _draw_import_panel(layout, op):
     row.prop(op, "import_text", toggle=True)
     row.prop(op, "import_points", toggle=True)
     box.prop(op, "hatch_mode")
+    box.prop(op, "merge_3d_faces")
     box.prop(op, "curve_resolution")
     box.prop(op, "flatten_z")
 
@@ -829,6 +692,81 @@ def _join_objects_per_layer(context, per_layer_objs):
     return result
 
 
+def _merge_3d_face_objects(objects):
+    """
+    Combine all DXF 3DFACE-derived mesh objects (named "DXF_Face*") into one
+    merged mesh and weld shared vertices, so a TIN surface from Civil 3D
+    becomes a single continuous terrain mesh in Blender. Other objects are
+    returned unchanged.
+
+    Returns the new `objects` list: original list with face objects replaced
+    by a single merged mesh object.
+    """
+    import bmesh
+
+    face_objs = [o for o in objects
+                 if o.type == "MESH" and o.data is not None
+                 and o.name.startswith("DXF_Face")]
+
+    if len(face_objs) < 2:
+        # Nothing to merge — either no faces or only one
+        return objects
+
+    bm = bmesh.new()
+    for obj in face_objs:
+        temp = bmesh.new()
+        temp.from_mesh(obj.data)
+        temp.transform(obj.matrix_world)
+
+        # Append temp's geometry into bm
+        vert_map = {}
+        for v in temp.verts:
+            vert_map[v.index] = bm.verts.new(v.co)
+        bm.verts.ensure_lookup_table()
+
+        for f in temp.faces:
+            try:
+                bm.faces.new([vert_map[v.index] for v in f.verts])
+            except ValueError:
+                # Duplicate face (same vertex set) — silently skip
+                pass
+
+        temp.free()
+
+    # Weld coincident vertices so triangles sharing an edge become continuous
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-5)
+
+    merged_mesh = bpy.data.meshes.new("DXF_Faces_Merged")
+    bm.to_mesh(merged_mesh)
+    bm.free()
+    merged_mesh.update()
+
+    merged_obj = bpy.data.objects.new("DXF_Faces_Merged", merged_mesh)
+
+    # Link into the same collection as the first face object so it inherits
+    # the layer/color context
+    target_coll = (face_objs[0].users_collection[0]
+                   if face_objs[0].users_collection
+                   else bpy.context.scene.collection)
+    target_coll.objects.link(merged_obj)
+
+    # Carry over the viewport color from the first face (color-by-layer)
+    try:
+        merged_obj.color = tuple(face_objs[0].color)
+    except (AttributeError, TypeError):
+        pass
+
+    # Remove the source objects (and their orphaned mesh data)
+    face_data_blocks = {o.data for o in face_objs}
+    for o in face_objs:
+        bpy.data.objects.remove(o, do_unlink=True)
+    for d in face_data_blocks:
+        if d.users == 0:
+            bpy.data.meshes.remove(d)
+
+    return [o for o in objects if o not in face_objs] + [merged_obj]
+
+
 def _recenter(objects, mode: str = "BBOX", scale: float = 1.0):
     """
     Reposition imported geometry by transforming the underlying mesh/curve
@@ -933,38 +871,3 @@ def _recenter(objects, mode: str = "BBOX", scale: float = 1.0):
                 pass
 
 
-# ============================================================================
-# DWG -> DXF bridge
-# ============================================================================
-def _convert_dwg_to_dxf(dwg_path: str, oda_exe: str, version: str) -> str:
-    import shutil
-
-    src_name = os.path.basename(dwg_path)
-    stage_in = tempfile.mkdtemp(prefix="cad2cube_in_")
-    stage_out = tempfile.mkdtemp(prefix="cad2cube_out_")
-
-    staged_dwg = os.path.join(stage_in, src_name)
-    shutil.copy2(dwg_path, staged_dwg)
-
-    cmd = [oda_exe, stage_in, stage_out, version, "DXF", "0", "1", src_name]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    except subprocess.TimeoutExpired:
-        shutil.rmtree(stage_in, ignore_errors=True)
-        raise RuntimeError("ODA conversion timed out after 5 minutes")
-    except FileNotFoundError:
-        shutil.rmtree(stage_in, ignore_errors=True)
-        raise RuntimeError(f"Cannot execute ODA File Converter at: {oda_exe}")
-    finally:
-        shutil.rmtree(stage_in, ignore_errors=True)
-
-    out_dxf = os.path.join(stage_out, Path(src_name).stem + ".dxf")
-    if not os.path.isfile(out_dxf):
-        shutil.rmtree(stage_out, ignore_errors=True)
-        raise RuntimeError(
-            "ODA did not produce a DXF. Check that the DWG file is valid.\n"
-            f"stdout: {result.stdout[:300]}\nstderr: {result.stderr[:300]}"
-        )
-
-    return out_dxf
