@@ -57,11 +57,20 @@ crashes on modern files, and has no hatch import, no layer mapping, and no unit 
 
 ## Install
 
+**Method 1: Direct Install (Recommended)**
+The easiest way for Blender 4.2+ users.
+1. In Blender, go to `Edit` → `Preferences` → `Get Extensions`.
+2. Search for **cad2cube** and click **Install**.
+   - 🌐 **Official Store:** [extensions.blender.org/add-ons/cad2cube](https://extensions.blender.org/add-ons/cad2cube/)
+
+**Method 2: Manual Download (.zip)**
 1. Download `cad2cube-x.x.x.zip` from either:
-   - 🟠 **Gumroad** (recommended): [lylongsoul.gumroad.com/l/esyoci](https://lylongsoul.gumroad.com/l/esyoci)
-   - 🐙 **GitHub Releases**: [github.com/lylongfts/CAD2CUBE/releases](https://github.com/lylongfts/CAD2CUBE/releases)
-2. Drag the zip into Blender, or: Edit → Preferences → Get Extensions → Install from Disk.
-3. Done. `File → Import → CAD2Cube — DXF (.dxf)`
+   - 🟠 **Gumroad** (Support the dev): [lylongsoul.gumroad.com/l/esyoci](https://lylongsoul.gumroad.com/l/esyoci)
+   - 🐙 **GitHub Releases**: [github.com/lylongfts/cad2cube/releases](https://github.com/lylongfts/cad2cube/releases)
+2. Drag the zip into Blender, or: `Edit` → `Preferences` → `Get Extensions` → drop-down menu → `Install from Disk`.
+
+---
+**Done.** Go to `File` → `Import` → `CAD2Cube - DXF (.dxf)`
 
 ## Usage
 
